@@ -169,3 +169,6 @@ poetry.toml
 
 # LSP config files
 pyrightconfig.json
+
+# Local chat history written by stdio runs (the container uses a named volume)
+chats/

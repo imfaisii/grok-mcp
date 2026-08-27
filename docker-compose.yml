@@ -1,4 +1,3 @@
-version: '3.8'
 services:
   grok-mcp:
     build:
@@ -6,8 +5,86 @@ services:
       dockerfile: Dockerfile
     image: grok-mcp:latest
     container_name: grok-mcp-server
+    env_file:
+      - .env
     environment:
-      - XAI_API_KEY=${XAI_API_KEY}
-    stdin_open: true
-    tty: true
+      - MCP_TRANSPORT=http
+    volumes:
+      # Named volume, not a bind mount: a bind mount would take the host
+      # directory's root ownership and the container's non-root user could
+      # not write chat history into it.
+      - chats_data:/app/chats
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:${MCP_PORT:-8000}/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  caddy:
+    image: caddy:2-alpine
+    profiles:
+      - caddy
+    # Only the vars the Caddyfile substitutes. Deliberately not env_file:
+    # Caddy has no business holding the xAI key or the MCP bearer token.
+    environment:
+      - DOMAIN=${DOMAIN}
+      - ACME_EMAIL=${ACME_EMAIL}
+      - MCP_PORT=${MCP_PORT:-8000}
+      - HTTPS_PORT=${HTTPS_PORT:-443}
+    ports:
+      # 80 is required for the ACME HTTP-01 challenge.
+      - "80:80"
+      # HTTPS_PORT lets the stack coexist with something already on 443.
+      - "${HTTPS_PORT:-443}:${HTTPS_PORT:-443}"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - grok-mcp
+    restart: unless-stopped
+
+  sni-router:
+    image: nginx:1.27-alpine
+    profiles:
+      - sni
+    # Host networking: both upstreams are on the host's loopback — caddy via its
+    # published HTTPS_PORT, and whatever else already owned 443 on SNI_FALLBACK.
+    network_mode: host
+    environment:
+      - DOMAIN=${DOMAIN}
+      - HTTPS_PORT=${HTTPS_PORT:-8443}
+      - SNI_FALLBACK=${SNI_FALLBACK}
+      # Render the template over the real nginx.conf, and substitute ONLY these
+      # three names so nginx's own $variables survive.
+      - NGINX_ENVSUBST_OUTPUT_DIR=/etc/nginx
+      - NGINX_ENVSUBST_FILTER=^(DOMAIN|HTTPS_PORT|SNI_FALLBACK)$$
+    volumes:
+      - ./sni/nginx.conf.template:/etc/nginx/templates/nginx.conf.template:ro
+    ulimits:
+      # Each proxied client costs two descriptors (client + upstream), so the
+      # default 1024 would cap the router well below worker_connections.
+      nofile:
+        soft: 65535
+        hard: 65535
+    restart: unless-stopped
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    profiles:
+      - tunnel
+    # Token passed as an env var, not on the command line, so it does not
+    # show up in `docker inspect` process args or `ps`.
+    environment:
+      - TUNNEL_TOKEN=${TUNNEL_TOKEN}
+    command: tunnel --no-autoupdate run
+    depends_on:
+      - grok-mcp
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:
+  chats_data:

@@ -1,0 +1,28 @@
+{
+	# HTTPS may run on a non-standard port when 443 is already taken on the
+	# host. TLS-ALPN only works on 443, so pin certificate issuance to the
+	# HTTP-01 challenge, which uses port 80.
+	email {$ACME_EMAIL}
+	servers {
+		protocols h1 h2
+	}
+}
+
+{$DOMAIN}:{$HTTPS_PORT:443} {
+	tls {
+		issuer acme {
+			disable_tlsalpn_challenge
+		}
+	}
+
+	reverse_proxy grok-mcp:{$MCP_PORT:8000} {
+		# MCP streamable-http responses are Server-Sent Events; never buffer them.
+		flush_interval -1
+
+		# Tool calls (e.g. video generation) can block for up to ~10 minutes.
+		transport http {
+			read_timeout  900s
+			write_timeout 900s
+		}
+	}
+}

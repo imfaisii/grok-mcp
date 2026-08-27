@@ -1,0 +1,33 @@
+# TLS SNI router. Use it when something else already owns port 443 on the host.
+# It reads the server name from the TLS ClientHello and forwards raw TCP, so
+# neither this server nor the other one loses its own TLS:
+#   ${DOMAIN}       -> caddy, on 127.0.0.1:${HTTPS_PORT}
+#   everything else -> ${SNI_FALLBACK}, wherever the other service now listens
+
+worker_processes auto;
+error_log /var/log/nginx/error.log warn;
+pid /var/run/nginx.pid;
+
+events {
+    worker_connections 4096;
+}
+
+stream {
+    map $ssl_preread_server_name $upstream {
+        ${DOMAIN}  127.0.0.1:${HTTPS_PORT};
+        default    ${SNI_FALLBACK};
+    }
+
+    server {
+        listen 443 reuseport;
+        listen [::]:443 reuseport;
+
+        ssl_preread on;
+        proxy_pass $upstream;
+
+        # generate_video blocks for up to ~10 minutes; the router must not cut
+        # the connection before caddy and the app would.
+        proxy_timeout         900s;
+        proxy_connect_timeout 10s;
+    }
+}

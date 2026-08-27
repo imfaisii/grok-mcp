@@ -26,6 +26,9 @@ venv/
 env/
 .env
 
+# Runtime data
+chats/
+
 # IDE
 .vscode/
 .idea/

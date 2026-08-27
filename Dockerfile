@@ -2,20 +2,17 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install system dependencies
+# curl is used by the compose healthcheck against /healthz
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Install uv using the installer script
+# Install uv (build-time only; the runtime uses the venv python directly)
 ADD https://astral.sh/uv/install.sh /uv-installer.sh
 RUN sh /uv-installer.sh && rm /uv-installer.sh
-
-# Add uv to PATH
 ENV PATH="/root/.local/bin:${PATH}"
 
-# Configure uv for optimal Docker usage
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     UV_PYTHON_DOWNLOADS=never \
@@ -32,8 +29,16 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 COPY main.py ./
 COPY src/ ./src/
 
-# Expose port (optional for stdio, required for HTTP transport later if I will add it)
+# Run as a non-root user (this service is exposed to the internet)
+RUN useradd --create-home --shell /usr/sbin/nologin appuser \
+    && mkdir -p /app/chats \
+    && chown -R appuser:appuser /app
+USER appuser
+
+# HTTP transport listens here (MCP_PORT). Reached via caddy or cloudflared,
+# never published to the host directly.
 EXPOSE 8000
 
-# Command to run the MCP server
-CMD ["uv", "run", "python", "main.py"]
+# Invoke the venv interpreter directly rather than `uv run`: appuser cannot
+# write uv's cache under /root, and re-resolving the lock at boot buys nothing.
+CMD ["/app/.venv/bin/python", "main.py"]
