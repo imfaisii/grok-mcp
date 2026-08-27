@@ -704,6 +704,8 @@ dependencies = [
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "python-dotenv" },
+    { name = "starlette" },
+    { name = "uvicorn" },
     { name = "xai-sdk" },
 ]
 
@@ -714,6 +716,8 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.9.0" },
     { name = "pydantic-settings", specifier = ">=2.5.0" },
     { name = "python-dotenv", specifier = ">=1.0.1" },
+    { name = "starlette", specifier = ">=0.47" },
+    { name = "uvicorn", specifier = ">=0.30" },
     { name = "xai-sdk", specifier = ">=1.17.0" },
 ]
 

@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 from typing import List, Optional
 from datetime import datetime
@@ -8,8 +9,16 @@ from xai_sdk import Client
 from xai_sdk.chat import user, system, assistant, image, file
 from xai_sdk.tools import web_search as xai_web_search, x_search as xai_x_search, code_execution
 from .utils import encode_image_to_base64, encode_video_to_base64, build_params, usage_footer, XAI_API_KEY, load_history, save_history
+from .http_app import transport_security_settings, run_http
 
-mcp = FastMCP(name="Grok MCP Server")
+mcp = FastMCP(
+    name="Grok MCP Server",
+    host=os.getenv("MCP_HOST", "0.0.0.0"),
+    port=int(os.getenv("MCP_PORT", "8000")),
+    streamable_http_path=os.getenv("MCP_PATH", "/mcp"),
+    stateless_http=True,
+    transport_security=transport_security_settings(),
+)
 READONLY = ToolAnnotations(readOnlyHint=True)
 
 # Note: Tools return strings not dicts because if you return a dict it shows up as hard to read raw JSON (lines all side by side for result text output) in the Claude UI and Claude Code.
@@ -1009,7 +1018,10 @@ async def chat_with_files(
 
 
 def main():
-    mcp.run(transport='stdio')
+    if os.getenv("MCP_TRANSPORT", "stdio") == "http":
+        run_http(mcp)
+    else:
+        mcp.run(transport='stdio')
 
 
 if __name__ == "__main__":

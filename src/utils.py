@@ -4,7 +4,7 @@ import base64
 from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv("example.env")
+load_dotenv(".env" if Path(".env").exists() else "example.env")
 
 XAI_API_KEY = os.getenv("XAI_API_KEY", "")
 

@@ -1,9 +1,10 @@
 import os
 import sys
+from pathlib import Path
 from dotenv import load_dotenv
 from src import main
 
-load_dotenv("example.env")
+load_dotenv(".env" if Path(".env").exists() else "example.env")
 
 if __name__ == "__main__":
 
