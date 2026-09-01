@@ -1,11 +1,15 @@
 import hmac
 import os
+import re
 import sys
 
 import uvicorn
-from starlette.responses import JSONResponse, PlainTextResponse
+from starlette.responses import FileResponse, JSONResponse, PlainTextResponse
 
 from mcp.server.transport_security import TransportSecuritySettings
+
+import oauth
+from files import FILES_DIR
 
 
 def transport_security_settings():
@@ -61,11 +65,11 @@ class BearerAuthMiddleware:
         if self.url_secret and _consume_secret_prefix(scope, self.url_secret):
             return await self.app(scope, receive, send)
         # Guard the MCP endpoint only; every other path falls through to the
-        # app's own 404. A 401 carrying WWW-Authenticate is how the MCP spec
-        # says "this server uses OAuth", so answering the OAuth discovery
-        # probes (/.well-known/oauth-protected-resource, /register) with 401
-        # sends clients into a client-registration flow this server has not
-        # got, which is what claude.ai connectors trip over.
+        # app's own 404. /.well-known/*, /register and /oauth/* are oauth.py's
+        # discovery and client-registration flow, which claude.ai connectors
+        # probe before they ever hold a bearer token, so gating them here
+        # would break the handshake instead of just the plain-bearer path.
+        # /healthz and /files/* are meant to be public too.
         path = scope.get("path", "")
         if path != self.mcp_path and not path.startswith(self.mcp_path + "/"):
             return await self.app(scope, receive, send)
@@ -75,23 +79,42 @@ class BearerAuthMiddleware:
                 provided = value
                 break
         # Compare bytes: a non-ASCII header would make the str form raise.
-        if not hmac.compare_digest(provided, self.expected):
-            response = JSONResponse(
-                {"error": "unauthorized"},
-                status_code=401,
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-            return await response(scope, receive, send)
-        await self.app(scope, receive, send)
+        if hmac.compare_digest(provided, self.expected):
+            return await self.app(scope, receive, send)
+        header = provided.decode("latin-1", "ignore")
+        bearer = header[7:] if header.lower().startswith("bearer ") else ""
+        if bearer and oauth.verify_access_token(bearer):
+            return await self.app(scope, receive, send)
+        response = JSONResponse(
+            {"error": "unauthorized"},
+            status_code=401,
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+        return await response(scope, receive, send)
 
 
 async def healthz(request):
     return PlainTextResponse("ok")
 
 
+async def get_file(request):
+    name = request.path_params["name"]
+    if not re.fullmatch(r"[0-9a-f-]{36}\.png", name):
+        return PlainTextResponse("not found", status_code=404)
+    path = FILES_DIR / name
+    if not path.exists():
+        return PlainTextResponse("not found", status_code=404)
+    return FileResponse(path, media_type="image/png")
+
+
 def build_app(mcp):
+    # custom_route only takes effect if it runs before streamable_http_app()
+    # reads mcp._custom_starlette_routes to build the Starlette app below.
+    for path, methods, handler, name in oauth.ROUTES:
+        mcp.custom_route(path, methods=methods, name=name)(handler)
     app = mcp.streamable_http_app()
     app.add_route("/healthz", healthz)
+    app.add_route("/files/{name}", get_file)
     app.add_middleware(
         BearerAuthMiddleware,
         token=os.getenv("MCP_AUTH_TOKEN", ""),

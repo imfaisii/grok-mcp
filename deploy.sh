@@ -27,6 +27,12 @@ die()   { err "$*"; exit 1; }
 # ---------- preflight ----------
 
 print_docker_install_hint() {
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    info "No Docker found. On macOS install Docker Desktop:"
+    info "  brew install --cask docker"
+    info "Full instructions: https://docs.docker.com/desktop/install/mac-install/"
+    return
+  fi
   local id="linux"
   if [[ -f /etc/os-release ]]; then
     id="$(. /etc/os-release && echo "$ID")"

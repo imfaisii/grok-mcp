@@ -14,4 +14,10 @@ dependencies = [
     "xai-sdk>=1.17.0",
     "uvicorn>=0.30",
     "starlette>=0.47",
+    "boto3>=1.35",
+    "pillow>=10.4",
+    "rembg>=2.0.59",
+    # rembg needs an ONNX backend; the CPU-only wheel is the one that installs
+    # headless on linux/amd64 in a slim container (the GPU builds pull in CUDA).
+    "onnxruntime>=1.19",
 ]

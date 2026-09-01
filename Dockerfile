@@ -2,10 +2,12 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# curl is used by the compose healthcheck against /healthz
+# curl is used by the compose healthcheck against /healthz. ffmpeg supplies
+# both ffmpeg and ffprobe, which ext/render.py shells out to.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # Install uv (build-time only; the runtime uses the venv python directly)
@@ -26,12 +28,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
 
 # Copy application code
-COPY main.py ./
+COPY main.py oauth.py r2.py media.py files.py ./
 COPY src/ ./src/
+COPY ext/ ./ext/
 
 # Run as a non-root user (this service is exposed to the internet)
 RUN useradd --create-home --shell /usr/sbin/nologin appuser \
-    && mkdir -p /app/chats \
+    && mkdir -p /app/chats /app/files \
     && chown -R appuser:appuser /app
 USER appuser
 
