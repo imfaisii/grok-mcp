@@ -514,6 +514,15 @@ async def _concat_videos(
         # at 720p, and padding them up to 1080x1920 only softens them.
         w, h = infos[0]["width"], infos[0]["height"]
 
+    # Only the first clip has sound and nothing is mixed into it (a body plus a
+    # silent subscribe card, which is every post today): mux that stream as-is
+    # instead of re-encoding it. Audio simply ends before the picture does.
+    copy_audio = (
+        [n for n, i in enumerate(infos) if i["has_audio"]] == [0]
+        and not music_url
+        and transition != "crossfade"
+    )
+
     idx = 0
     seg_labels = []
     filter_parts = []
@@ -526,11 +535,16 @@ async def _concat_videos(
             f"[{vin}:v]scale={w}:{h}:force_original_aspect_ratio=decrease,"
             f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={FPS},format=yuv420p[v{n}]"
         )
-        if info["has_audio"]:
-            filter_parts.append(f"[{vin}:a]aformat=sample_rates=44100:channel_layouts=stereo[a{n}]")
+        # Every audio pad pins sample_fmts=fltp. Left unpinned, concat negotiates
+        # u8 (anullsrc decodes as pcm_u8) and the voice is quantised to 8 bits
+        # before the AAC encoder sees it: about 10 dB of hiss on every word.
+        if copy_audio:
+            pass
+        elif info["has_audio"]:
+            filter_parts.append(f"[{vin}:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[a{n}]")
         else:
             input_args += ["-f", "lavfi", "-t", str(info["duration"] or 1), "-i", "anullsrc=r=44100:cl=stereo"]
-            filter_parts.append(f"[{idx + 1}:a]anull[a{n}]")
+            filter_parts.append(f"[{idx + 1}:a]aformat=sample_fmts=fltp[a{n}]")
             idx += 1
         idx += 1
         seg_labels.append(n)
@@ -550,8 +564,12 @@ async def _concat_videos(
     else:
         # concat wants the streams interleaved per segment ([v0][a0][v1][a1]...),
         # not all video labels followed by all audio labels.
-        pairs = "".join(f"[v{n}][a{n}]" for n in seg_labels)
-        filter_parts.append(f"{pairs}concat=n={len(seg_labels)}:v=1:a=1[vc][ac]")
+        if copy_audio:
+            pairs = "".join(f"[v{n}]" for n in seg_labels)
+            filter_parts.append(f"{pairs}concat=n={len(seg_labels)}:v=1:a=0[vc]")
+        else:
+            pairs = "".join(f"[v{n}][a{n}]" for n in seg_labels)
+            filter_parts.append(f"{pairs}concat=n={len(seg_labels)}:v=1:a=1[vc][ac]")
         final_v, final_a = "vc", "ac"
         final_dur = sum(i["duration"] for i in infos)
 
@@ -564,7 +582,7 @@ async def _concat_videos(
         idx += 1
         fade_start = max(0.0, final_dur - 1.0)
         filter_parts.append(
-            f"[{music_idx}:a]atrim=0:{final_dur},asetpts=PTS-STARTPTS,"
+            f"[{music_idx}:a]aformat=sample_fmts=fltp,atrim=0:{final_dur},asetpts=PTS-STARTPTS,"
             f"volume={music_volume_db}dB,afade=t=out:st={fade_start}:d=1[music]"
         )
         filter_parts.append(f"[{final_a}][music]amix=inputs=2:duration=first:normalize=0[aout]")
@@ -602,10 +620,10 @@ async def _concat_videos(
     cmd = [
         *input_args,
         "-filter_complex", ";".join(filter_parts),
-        "-map", f"[{final_v}]", "-map", f"[{final_a}]",
+        "-map", f"[{final_v}]",
+        *(["-map", "0:a", "-c:a", "copy"] if copy_audio else ["-map", f"[{final_a}]", "-c:a", "aac", "-b:a", "128k"]),
         "-r", str(FPS),
         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-color_range", "tv", "-preset", "veryfast",
-        "-c:a", "aac", "-b:a", "128k",
         "-t", str(final_dur),
         "-movflags", "+faststart",
         str(out_path),
