@@ -24,6 +24,11 @@ FPS = 30
 FFMPEG_TIMEOUT = 240
 MAX_SLIDESHOW_SECONDS = 180
 TARGET_SIZES = {"9:16": (1080, 1920), "1:1": (1080, 1080), "16:9": (1920, 1080)}
+# Cream dissolve between stills. Short enough that the picture does not muddle;
+# long enough to hide the still-to-still hitch. Clips shorter than XFADE_MIN_ROOM
+# fall back to a cut (subscribe-card frames are 0.6–0.8 s).
+XFADE_S = 0.28
+XFADE_MIN_ROOM = 0.8
 
 # Safe zones for 1080x1920: nothing in the top 250px or bottom 400px.
 TOP_SAFE = 250
@@ -82,6 +87,16 @@ async def _video_info(path: Path) -> dict:
         "duration": duration,
         "fps": fps,
         "has_audio": astream is not None,
+        # Stream identity fields, used by concat_videos to decide whether a
+        # lossless demuxer join (-c copy) is possible instead of the
+        # filter-graph re-encode.
+        "vcodec": vstream.get("codec_name") if vstream else None,
+        "pix_fmt": vstream.get("pix_fmt") if vstream else None,
+        "acodec": astream.get("codec_name") if astream else None,
+        "sample_rate": int(astream["sample_rate"]) if astream and astream.get("sample_rate") else None,
+        "channels": astream.get("channels") if astream else None,
+        "channel_layout": astream.get("channel_layout") if astream else None,
+        "aprofile": astream.get("profile") if astream else None,
     }
 
 
@@ -178,43 +193,88 @@ def _sentence_spans(words: list[dict]) -> list[tuple[float, float]]:
 # --------------------------------------------------------------------------
 
 
+def _stabilize(fps: int, label: str) -> str:
+    """Pin frame rate and timebase so xfade/concat share 1/fps.
+
+    zoompan emits timebase 1/1000000. xfade refuses mismatched timebases and
+    ffmpeg exits 234 (`First input link main timebase (1/1000000) do not match
+    the corresponding second input link xfade timebase (1/30)`). The same pin
+    also removes the one-frame hitch on a concat of mixed-timebase stills.
+    """
+    return f"fps={fps},settb=1/{fps},setsar=1,format=yuv420p[{label}]"
+
+
+def _join_fade_s(name: str, left: float, right: float) -> float:
+    """Fade length for one still-to-still join, or 0 to fall back to a cut."""
+    if name not in ("crossfade", "dip_black"):
+        return 0.0
+    room = min(left, right)
+    if room < XFADE_MIN_ROOM:
+        return 0.0
+    return min(XFADE_S, 0.35 * room)
+
+
+def _slideshow_joins(
+    durations: list[float], segments: list[dict]
+) -> tuple[list[float], list[tuple[str, float]]]:
+    """Return (gen_durations, joins).
+
+    `transition` on segment N is the join *before* that segment. Each outgoing
+    fade is appended to that clip's generated length so xfade's overlap does
+    not eat the voiced timeline: `sum(gen) - sum(fade) == sum(durations)`.
+    """
+    n = len(durations)
+    fade_out = [0.0] * n
+    joins: list[tuple[str, float]] = []
+    for i in range(n - 1):
+        name = segments[i + 1].get("transition") or "cut"
+        td = _join_fade_s(name, durations[i], durations[i + 1])
+        if td == 0.0:
+            name = "cut"
+        fade_out[i] = td
+        joins.append((name, td))
+    gen = [durations[i] + fade_out[i] for i in range(n)]
+    return gen, joins
+
+
 def _bg_chain(idx: int, n: int, motion: str, w: int, h: int, duration: float, fps: int) -> str:
     """Filter_complex snippet turning input [idx:v] into a WxH stream labeled
-    [bg{n}], normalized to yuv420p."""
+    [bg{n}], pinned to fps/1/fps so joins do not hitch."""
     label = f"bg{n}"
     up_w, up_h = int(w * 1.16), int(h * 1.16)
     fit = f"scale={up_w}:{up_h}:force_original_aspect_ratio=increase,crop={up_w}:{up_h}"
+    pin = _stabilize(fps, label)
 
     if motion == "kenburns_in":
         return (
             f"[{idx}:v]scale={w * 3}:{h * 3}:force_original_aspect_ratio=increase,"
             f"zoompan=z='min(zoom+0.0018,1.4)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:"
-            f"s={w}x{h}:fps={fps},setsar=1,format=yuv420p[{label}]"
+            f"s={w}x{h}:fps={fps},{pin}"
         )
     if motion == "kenburns_out":
         return (
             f"[{idx}:v]scale={w * 3}:{h * 3}:force_original_aspect_ratio=increase,"
             f"zoompan=z='if(eq(on,1),1.4,max(zoom-0.0018,1.0))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:"
-            f"s={w}x{h}:fps={fps},setsar=1,format=yuv420p[{label}]"
+            f"s={w}x{h}:fps={fps},{pin}"
         )
     if motion == "pan_left":
-        return f"[{idx}:v]{fit},crop={w}:{h}:x='(in_w-{w})*(1-t/{duration})':y='(in_h-{h})/2',setsar=1,format=yuv420p[{label}]"
+        return f"[{idx}:v]{fit},crop={w}:{h}:x='(in_w-{w})*(1-t/{duration})':y='(in_h-{h})/2',{pin}"
     if motion == "pan_right":
-        return f"[{idx}:v]{fit},crop={w}:{h}:x='(in_w-{w})*(t/{duration})':y='(in_h-{h})/2',setsar=1,format=yuv420p[{label}]"
+        return f"[{idx}:v]{fit},crop={w}:{h}:x='(in_w-{w})*(t/{duration})':y='(in_h-{h})/2',{pin}"
     if motion == "shake":
         return (
             f"[{idx}:v]{fit},crop={w}:{h}:"
-            f"x='(in_w-{w})/2+10*sin(2*PI*t*3)':y='(in_h-{h})/2+10*cos(2*PI*t*2.6)',setsar=1,format=yuv420p[{label}]"
+            f"x='(in_w-{w})/2+10*sin(2*PI*t*3)':y='(in_h-{h})/2+10*cos(2*PI*t*2.6)',{pin}"
         )
     if motion == "slide_in_bottom":
         return (
             f"[{idx}:v]scale={w}:{h}:force_original_aspect_ratio=decrease,"
             f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=rgba[fg{n}];"
             f"color=black:s={w}x{h}:d={duration}[cv{n}];"
-            f"[cv{n}][fg{n}]overlay=x=0:y='if(lt(t,0.5),(1-t/0.5)*{h},0)':format=auto,setsar=1,format=yuv420p[{label}]"
+            f"[cv{n}][fg{n}]overlay=x=0:y='if(lt(t,0.5),(1-t/0.5)*{h},0)':format=auto,{pin}"
         )
     # none
-    return f"[{idx}:v]{fit},crop={w}:{h}:x='(in_w-{w})/2':y='(in_h-{h})/2',setsar=1,format=yuv420p[{label}]"
+    return f"[{idx}:v]{fit},crop={w}:{h}:x='(in_w-{w})/2':y='(in_h-{h})/2',{pin}"
 
 
 def _overlay_chain(idx: int, n: int, motion: str, w: int, h: int) -> tuple[str, str]:
@@ -277,7 +337,11 @@ async def _render_slideshow(
     if total_duration > MAX_SLIDESHOW_SECONDS:
         raise ValueError(f"slideshow duration {total_duration:.1f}s exceeds the {MAX_SLIDESHOW_SECONDS}s cap")
 
+    gen_durations, joins = _slideshow_joins(durations, segments)
+
     # Download inputs, tracking ffmpeg input index for each.
+    # -t uses gen_durations so an outgoing fade has a tail to dissolve into
+    # without shortening the voiced slot.
     input_args: list[str] = []
     idx = 0
     bg_idx = []
@@ -285,13 +349,13 @@ async def _render_slideshow(
     for n, seg in enumerate(segments):
         img_path = tmpdir / f"bg{n}.img"
         await _download(seg["image_url"], img_path)
-        input_args += ["-loop", "1", "-framerate", str(FPS), "-t", str(durations[n]), "-i", str(img_path)]
+        input_args += ["-loop", "1", "-framerate", str(FPS), "-t", str(gen_durations[n]), "-i", str(img_path)]
         bg_idx.append(idx)
         idx += 1
         if seg.get("overlay_image_url"):
             ov_path = tmpdir / f"ov{n}.png"
             await _download(seg["overlay_image_url"], ov_path)
-            input_args += ["-loop", "1", "-framerate", str(FPS), "-t", str(durations[n]), "-i", str(ov_path)]
+            input_args += ["-loop", "1", "-framerate", str(FPS), "-t", str(gen_durations[n]), "-i", str(ov_path)]
             ov_idx.append(idx)
             idx += 1
         else:
@@ -316,44 +380,41 @@ async def _render_slideshow(
     filter_parts: list[str] = []
     seg_labels = []
     for n, seg in enumerate(segments):
-        filter_parts.append(_bg_chain(bg_idx[n], n, seg.get("motion", "none"), w, h, durations[n], FPS))
+        filter_parts.append(_bg_chain(bg_idx[n], n, seg.get("motion", "none"), w, h, gen_durations[n], FPS))
         if ov_idx[n] is not None:
             ov_chain, ov_expr = _overlay_chain(ov_idx[n], n, seg.get("overlay_motion", "none"), w, h)
             filter_parts.append(ov_chain)
-            filter_parts.append(f"[bg{n}][ov{n}]overlay={ov_expr}:format=auto,format=yuv420p[seg{n}]")
+            filter_parts.append(
+                f"[bg{n}][ov{n}]overlay={ov_expr}:format=auto,{_stabilize(FPS, f'seg{n}')}"
+            )
+            seg_labels.append(f"seg{n}")
         else:
-            filter_parts.append(f"[bg{n}]null[seg{n}]")
-        seg_labels.append(f"seg{n}")
+            seg_labels.append(f"bg{n}")
 
-    transition = segments[0].get("transition", "cut") if segments else "cut"
-    # transition applies per-segment boundary; use the first non-"cut" value if mixed, else cut.
-    transitions = [s.get("transition", "cut") for s in segments[1:]] or ["cut"]
-
-    if all(t == "cut" for t in transitions):
+    if not joins or all(name == "cut" for name, _td in joins):
         concat_in = "".join(f"[{lbl}]" for lbl in seg_labels)
         filter_parts.append(f"{concat_in}concat=n={len(seg_labels)}:v=1:a=0[vconcat]")
         final_label = "vconcat"
         final_duration = total_duration
     else:
         cur_label = seg_labels[0]
-        cur_duration = durations[0]
+        cur_voiced = durations[0]
         for n in range(1, len(seg_labels)):
-            t_name = transitions[n - 1] if n - 1 < len(transitions) else "cut"
+            t_name, td = joins[n - 1]
             out_label = f"xf{n}"
-            if t_name == "cut":
+            if t_name == "cut" or td <= 0:
                 filter_parts.append(f"[{cur_label}][{seg_labels[n]}]concat=n=2:v=1:a=0[{out_label}]")
-                cur_duration = cur_duration + durations[n]
+                cur_voiced += durations[n]
             else:
                 xfade_name = "fadeblack" if t_name == "dip_black" else "fade"
-                td = min(0.5, 0.4 * min(cur_duration, durations[n]))
-                offset = max(0.0, cur_duration - td)
+                offset = cur_voiced
                 filter_parts.append(
                     f"[{cur_label}][{seg_labels[n]}]xfade=transition={xfade_name}:duration={td}:offset={offset}[{out_label}]"
                 )
-                cur_duration = offset + durations[n]
+                cur_voiced += durations[n]
             cur_label = out_label
         final_label = cur_label
-        final_duration = cur_duration
+        final_duration = total_duration
 
     audio_label = None
     if voice_idx is not None:
@@ -447,7 +508,10 @@ async def render_slideshow(
             segment) is `cut`, `crossfade` or `dip_black`. `overlay_image_url`
             is a transparent PNG (e.g. a character cutout) composited over the
             background with its own `overlay_motion` (`slide_in_bottom`,
-            `pop`, `none`).
+            `pop`, `none`). Every motion chain is pinned to 30 fps / timebase
+            1/30 so `crossfade` and `dip_black` configure; outgoing clips are
+            extended by the fade so the voiced timeline stays `sum(duration)`.
+            Clips shorter than 0.8 s fall back to a cut.
         voiceover_url: Optional narration track. If segment `duration`s are
             omitted, segments are auto-timed to the voiceover's sentence
             boundaries (evenly distributed when sentence and segment counts differ).
@@ -486,6 +550,24 @@ async def render_slideshow(
 # --------------------------------------------------------------------------
 
 
+def _streams_match(infos: list[dict]) -> bool:
+    """True when every clip's video and audio stream parameters are identical
+    (codec, size, pix_fmt, fps, sample rate, channel layout, audio profile),
+    i.e. the clips are demuxer-joinable with no re-encode."""
+    def key(i: dict) -> tuple:
+        return (
+            i["vcodec"], i["width"], i["height"], i["pix_fmt"], round(i["fps"], 3),
+            i["acodec"], i["sample_rate"], i["channels"], i["channel_layout"], i["aprofile"],
+        )
+    keys = [key(i) for i in infos]
+    return all(k == keys[0] for k in keys)
+
+
+def _escape_concat_list_path(path: Path) -> str:
+    """Escape a path for an ffmpeg concat demuxer list line (file '...')."""
+    return str(path).replace("'", "'\\''")
+
+
 async def _concat_videos(
     video_urls: list[str],
     transition: str,
@@ -496,7 +578,7 @@ async def _concat_videos(
     tmpdir: Path,
     job_id: Optional[str] = None,
     key_prefix: Optional[str] = None,
-) -> Path:
+) -> tuple[Path, str]:
     if len(video_urls) < 1:
         raise ValueError("video_urls must not be empty")
 
@@ -508,6 +590,31 @@ async def _concat_videos(
         await _download(url, path)
         info = await _video_info(path)
         infos.append(info)
+
+    # Lossless fast path: every render_slideshow chunk in a long-form piece
+    # shares the same renderer and codec settings, so a plain cut with no
+    # music/captions/crossfade and matching streams on every clip can be
+    # stream-copied with the concat demuxer instead of re-encoded through the
+    # filter graph below (measured 32.49dB SNR loss on the re-encode path for
+    # a two-voiced-clip join; see leaf-1.2.2 report).
+    if (
+        len(video_urls) >= 2
+        and transition == "cut"
+        and not music_url
+        and not (captions and captions.get("mode") == "burn")
+        and all(i["has_audio"] for i in infos)
+        and _streams_match(infos)
+    ):
+        list_path = tmpdir / "concat_list.txt"
+        lines = [f"file '{_escape_concat_list_path(tmpdir / f'clip{n}.mp4')}'" for n in range(len(video_urls))]
+        list_path.write_text("\n".join(lines))
+        out_path = tmpdir / "concat.mp4"
+        await _run_ffmpeg([
+            "-f", "concat", "-safe", "0", "-i", str(list_path),
+            "-c", "copy", "-movflags", "+faststart",
+            str(out_path),
+        ])
+        return out_path, "copy"
 
     if not normalize and infos[0]["width"] and infos[0]["height"]:
         # Keep the source frame. Talking clips come back from reference-to-video
@@ -629,7 +736,7 @@ async def _concat_videos(
         str(out_path),
     ]
     await _run_ffmpeg(cmd)
-    return out_path
+    return out_path, "reencode"
 
 
 async def concat_videos(
@@ -666,7 +773,7 @@ async def concat_videos(
         Standard media envelope with the hosted video URL.
     """
     with tempfile.TemporaryDirectory() as tmp:
-        out_path = await _concat_videos(
+        out_path, join = await _concat_videos(
             video_urls, transition, music_url, music_volume_db, captions, normalize, Path(tmp), job_id, key_prefix
         )
         info = await _video_info(out_path)
@@ -680,6 +787,7 @@ async def concat_videos(
             width=info["width"],
             height=info["height"],
             nbytes=out_path.stat().st_size,
+            join=join,
         )
 
 
