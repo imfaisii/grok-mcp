@@ -178,14 +178,18 @@ def _cost_and_footer(usage: Optional[dict], show_usage: bool) -> tuple:
     return cost, footer
 
 
-async def _finalize(
-    data: dict, tool: str, job_id: Optional[str], key_prefix: Optional[str], show_usage: bool
-) -> dict:
+async def _finalize(data: dict, tool: str, show_usage: bool, key: str) -> dict:
     """Turn a completed poll response into the standard R2 envelope.
 
     Persists the result to R2, preferring the `output.upload_url` PUT that
     xAI already performed (confirmed with `r2.head`) and falling back to
     downloading `video.url` when that object never landed.
+
+    `key` must be the same key the caller presigned the upload for. It cannot be
+    recomputed here: `media_key` with `n=None` asks `_next_index` for the next
+    free suffix, and once xAI's PUT has landed that is one past the object we
+    are looking for -- so we would head `{tool}-1.mp4` while the video sits at
+    `{tool}-0.mp4` and report "No Video Returned" for a render that succeeded.
     """
     status = data.get("status")
     model = data.get("model")
@@ -238,19 +242,28 @@ async def _finalize(
             progress=data.get("progress"),
         )
 
-    key = r2.media_key(tool, "mp4", job_id=job_id, key_prefix=key_prefix)
     nbytes = None
     permanent_url = None
 
     # When output.upload_url was sent, xAI PUTs straight into the bucket and may
     # never populate video.url, so the object landing is the success signal. A
-    # missing url on its own must not be read as a moderation block.
+    # missing url on its own must not be read as a moderation block. xAI's
+    # status can flip to "done" slightly before that PUT is visible to
+    # head_object, so retry briefly before falling back. And when upload_url
+    # was used, video.url comes back as that same presigned PUT URL verbatim --
+    # a GET against a PUT-signed URL always 403s, so a presigned URL must
+    # never be treated as a download source.
     if r2.configured():
-        head = r2.head(key)
+        head = None
+        for attempt in range(5):
+            head = await asyncio.to_thread(r2.head, key)
+            if head is not None:
+                break
+            await asyncio.sleep(1.5)
         if head is not None:
             permanent_url = r2.public_url(key)
             nbytes = head["bytes"]
-        elif source_url:
+        elif source_url and "X-Amz-Signature" not in source_url:
             permanent_url, nbytes = await r2.put_from_url(source_url, key)
     elif source_url:
         permanent_url = source_url
@@ -390,7 +403,7 @@ def register(mcp):
         request_id = await _post_video(path, payload)
         data = await _poll_video(request_id)
         data.setdefault("request_id", request_id)
-        return await _finalize(data, tool, job_id, key_prefix, show_usage)
+        return await _finalize(data, tool, show_usage, key)
 
     @mcp.tool(name="extend_video")
     async def extend_video(
@@ -460,7 +473,7 @@ def register(mcp):
         request_id = await _post_video("extensions", payload)
         data = await _poll_video(request_id)
         data.setdefault("request_id", request_id)
-        return await _finalize(data, tool, job_id, key_prefix, show_usage)
+        return await _finalize(data, tool, show_usage, key)
 
     @mcp.tool(name="list_voices", annotations=READONLY)
     async def list_voices() -> list:
