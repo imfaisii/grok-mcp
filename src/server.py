@@ -8,7 +8,7 @@ from mcp.types import ToolAnnotations
 from xai_sdk import Client
 from xai_sdk.chat import user, system, assistant, image, file
 from xai_sdk.tools import web_search as xai_web_search, x_search as xai_x_search, code_execution
-from .utils import encode_image_to_base64, encode_video_to_base64, build_params, usage_footer, XAI_API_KEY, load_history, save_history
+from .utils import encode_image_to_base64, encode_video_to_base64, build_params, usage_footer, XAI_API_KEY, load_history, save_history, list_sessions, delete_history
 from .http_app import transport_security_settings, run_http
 
 mcp = FastMCP(
@@ -87,16 +87,15 @@ async def list_chat_sessions():
         Markdown list of session names with turn counts and last-message timestamps,
         or a placeholder message when no sessions exist.
     """
-    Path("chats").mkdir(exist_ok=True)
-    sessions = sorted(Path("chats").glob("*.json"))
+    sessions = list_sessions()
     if not sessions:
         return "No chat sessions found."
     result = ["**Chat Sessions:**\n"]
-    for s in sessions:
-        history = json.loads(s.read_text())
+    for name in sessions:
+        history = load_history(name)
         turns = len(history) // 2
         last = history[-1]["time"] if history else "empty"
-        result.append(f"- `{s.stem}` — {turns} turn(s), last: {last}")
+        result.append(f"- `{name}` — {turns} turn(s), last: {last}")
     return "\n".join(result)
 
 
@@ -133,10 +132,8 @@ async def clear_chat_history(session: str = "default"):
     Returns:
         Confirmation string or a not-found message.
     """
-    path = Path("chats") / f"{session}.json"
-    if not path.exists():
+    if not delete_history(session):
         return f"No session `{session}` found."
-    path.unlink()
     return f"Cleared history for session `{session}`."
 
 

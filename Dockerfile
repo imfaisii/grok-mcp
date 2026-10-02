@@ -32,6 +32,11 @@ COPY main.py oauth.py r2.py media.py files.py ./
 COPY src/ ./src/
 COPY ext/ ./ext/
 
+# Bake the rembg model into the image. Fetched lazily it is a ~170 MB download
+# on the first cutout after every cold start, since container disk is ephemeral.
+ENV U2NET_HOME=/app/.u2net
+RUN /app/.venv/bin/python -c "from rembg import new_session; new_session('isnet-general-use')"
+
 # Run as a non-root user (this service is exposed to the internet)
 RUN useradd --create-home --shell /usr/sbin/nologin appuser \
     && mkdir -p /app/chats /app/files \

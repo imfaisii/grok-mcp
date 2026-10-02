@@ -172,3 +172,6 @@ pyrightconfig.json
 
 # Local chat history written by stdio runs (the container uses a named volume)
 chats/
+node_modules/
+.wrangler/
+worker-configuration.d.ts

@@ -59,3 +59,13 @@ demo_*.py
 # Temporary files
 *.tmp
 *.temp
+
+# Worker
+node_modules/
+.wrangler/
+worker.ts
+wrangler.jsonc
+package.json
+bun.lock
+worker-configuration.d.ts
+tsconfig.json

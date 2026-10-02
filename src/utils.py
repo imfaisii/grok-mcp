@@ -51,7 +51,25 @@ def usage_footer(*responses):
         return ""
     return "\n\n---\n" + " · ".join(parts)
 
+# Chat history lives in a private R2 bucket when R2_CHATS_BUCKET is set, so it
+# survives container restarts (the Cloudflare container disk is ephemeral), and
+# under ./chats otherwise. Never the public media bucket: r2.dev serves it to anyone.
+CHATS_BUCKET = os.getenv("R2_CHATS_BUCKET")
+
+
+def _chat_s3():
+    import r2
+    return r2._s3() if CHATS_BUCKET and r2.configured() else None
+
+
 def load_history(session: str):
+    s3 = _chat_s3()
+    if s3:
+        try:
+            body = s3.get_object(Bucket=CHATS_BUCKET, Key=f"chats/{session}.json")["Body"].read()
+        except s3.exceptions.NoSuchKey:
+            return []
+        return json.loads(body)
     path = Path("chats") / f"{session}.json"
     if path.exists():
         return json.loads(path.read_text())
@@ -59,8 +77,36 @@ def load_history(session: str):
 
 
 def save_history(session: str, history: list):
+    data = json.dumps(history, indent=2, ensure_ascii=False)
+    s3 = _chat_s3()
+    if s3:
+        s3.put_object(Bucket=CHATS_BUCKET, Key=f"chats/{session}.json", Body=data.encode(), ContentType="application/json")
+        return
     Path("chats").mkdir(exist_ok=True)
-    (Path("chats") / f"{session}.json").write_text(json.dumps(history, indent=2, ensure_ascii=False))
+    (Path("chats") / f"{session}.json").write_text(data)
+
+
+def list_sessions() -> list[str]:
+    s3 = _chat_s3()
+    if s3:
+        names = []
+        for page in s3.get_paginator("list_objects_v2").paginate(Bucket=CHATS_BUCKET, Prefix="chats/"):
+            names += [o["Key"][len("chats/"):-len(".json")] for o in page.get("Contents", []) if o["Key"].endswith(".json")]
+        return sorted(names)
+    Path("chats").mkdir(exist_ok=True)
+    return [p.stem for p in sorted(Path("chats").glob("*.json"))]
+
+
+def delete_history(session: str) -> bool:
+    """Delete a session's history. False when there was none."""
+    if not load_history(session):
+        return False
+    s3 = _chat_s3()
+    if s3:
+        s3.delete_object(Bucket=CHATS_BUCKET, Key=f"chats/{session}.json")
+    else:
+        (Path("chats") / f"{session}.json").unlink()
+    return True
 
 
 def build_params(**kwargs):

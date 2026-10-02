@@ -1,0 +1,12 @@
+{
+  "name": "grok-mcp-worker",
+  "private": true,
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "cf-typegen": "wrangler types"
+  },
+  "devDependencies": {
+    "@cloudflare/containers": "^0.3.7",
+    "wrangler": "^4.120.0"
+  }
+}
