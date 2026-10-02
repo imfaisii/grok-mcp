@@ -16,14 +16,16 @@
       "max_instances": 2
     }
   ],
+  "routes": [{ "pattern": "grok.deeporax.com", "custom_domain": true }],
+  "workers_dev": true,
   "durable_objects": {
     "bindings": [{ "name": "GROK_MCP", "class_name": "GrokMcp" }]
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["GrokMcp"] }],
   "vars": {
     // Must equal the public hostname: the server allow-lists it as the Host
-    // header and issues OAuth metadata for it. Flip to grok.deeporax.com at cutover.
-    "DOMAIN": "grok-mcp.imfaisii009.workers.dev",
+    // header and issues OAuth metadata for it.
+    "DOMAIN": "grok.deeporax.com",
     "MCP_PATH": "/mcp",
     "R2_BUCKET": "social-automations",
     "R2_PUBLIC_BASE": "https://pub-d32ba5d03dba4262b2552ed6e1f5f223.r2.dev",
