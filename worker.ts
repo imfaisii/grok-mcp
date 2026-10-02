@@ -46,6 +46,26 @@ export class GrokMcp extends Container<Env> {
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const response = await getContainer(env.GROK_MCP).fetch(request);
+    // claude.ai reads the authorization-server metadata and gives up before
+    // registering unless it can use a client-metadata-document client id or
+    // a secret-based token auth method. Advertise both, as deeporax.com's
+    // working server does: authorize and token accept any client id, and the
+    // token endpoint ignores a posted client_secret.
+    const { pathname } = new URL(request.url);
+    if (pathname.startsWith("/.well-known/oauth-authorization-server") && response.ok) {
+      const metadata = (await response.json()) as Record<string, unknown>;
+      const headers = new Headers(response.headers);
+      headers.delete("content-length");
+      return Response.json(
+        {
+          ...metadata,
+          // Not client_secret_basic: the token endpoint reads client_id from the body only.
+          token_endpoint_auth_methods_supported: ["none", "client_secret_post"],
+          client_id_metadata_document_supported: true,
+        },
+        { headers },
+      );
+    }
     // claude.ai only starts OAuth when the MCP endpoint's 401 points at the
     // protected-resource metadata (RFC 9728). The server's bearer middleware
     // sends a bare `Bearer`, so name the metadata URL for the public host here.
