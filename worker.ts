@@ -44,7 +44,17 @@ export class GrokMcp extends Container<Env> {
 }
 
 export default {
-  fetch(request: Request, env: Env): Promise<Response> {
-    return getContainer(env.GROK_MCP).fetch(request);
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const response = await getContainer(env.GROK_MCP).fetch(request);
+    // claude.ai only starts OAuth when the MCP endpoint's 401 points at the
+    // protected-resource metadata (RFC 9728). The server's bearer middleware
+    // sends a bare `Bearer`, so name the metadata URL for the public host here.
+    if (response.status !== 401 || response.headers.get("WWW-Authenticate") !== "Bearer") {
+      return response;
+    }
+    const headers = new Headers(response.headers);
+    const metadata = new URL("/.well-known/oauth-protected-resource", request.url);
+    headers.set("WWW-Authenticate", `Bearer resource_metadata="${metadata}"`);
+    return new Response(response.body, { status: 401, headers });
   },
 } satisfies ExportedHandler<Env>;
